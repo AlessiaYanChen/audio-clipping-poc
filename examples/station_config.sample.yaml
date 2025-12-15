@@ -23,4 +23,8 @@ heuristics:
   keyword_score: 5.0
 text:
   chunk_s: 8
+  llm_segmentation: false
+  llm_model: gpt-4o-mini
+  llm_prompt: |
+    Identify topic changes.
   embedding_model: text-embedding-3-large

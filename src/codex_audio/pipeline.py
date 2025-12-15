@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from dotenv import load_dotenv
 
+from codex_audio.boundary.candidates import BoundaryCandidate
 from codex_audio.clipper.ffmpeg import clip_segments
 from codex_audio.config.station import StationConfig, load_station_config
 from codex_audio.features.embeddings import AudioEmbedding, get_audio_embeddings
@@ -22,9 +23,15 @@ from codex_audio.segmentation import (
     refine_chunk_segments,
 )
 from codex_audio.segmentation.selection import SegmentConstraint
-from codex_audio.text_features import TextChunk, build_text_chunks
+from codex_audio.text_features import TextChunk, build_text_chunks, detect_topic_boundaries
 from codex_audio.text_features.embeddings import DEFAULT_EMBED_MODEL, ChunkEmbedding, embed_chunks
-from codex_audio.transcription import TranscriptWord, TranscriptionOutput, transcribe_audio
+from codex_audio.transcription import (
+    TranscriptWord,
+    TranscriptionOutput,
+    match_quote_to_timestamps,
+    refine_range_with_silence,
+    transcribe_audio,
+)
 from codex_audio.utils import get_logger
 
 load_dotenv()
@@ -80,6 +87,10 @@ class StorySegmentationPipeline:
         self.config = config
         self.station_config = config.resolve_station_config()
         self._refinement_params = self._build_refinement_params()
+        text_cfg = self.station_config.text or {}
+        self._llm_segmentation_enabled = bool(text_cfg.get("llm_segmentation"))
+        self._llm_model = text_cfg.get("llm_model")
+        self._llm_prompt = text_cfg.get("llm_prompt")
         logger.debug(
             "Initialized pipeline",
             extra={"station": self.station_config.name, "sample_rate": self.station_config.sample_rate},
@@ -119,6 +130,9 @@ class StorySegmentationPipeline:
         text_embeddings = self._build_text_embeddings(text_chunks)
 
         transcript_words = transcription.words if transcription else None
+        llm_candidates: List[BoundaryCandidate] = []
+        if self._llm_segmentation_enabled and transcription and transcription.words:
+            llm_candidates = self._generate_llm_candidates(transcription.words, audio_path=normalized_path)
 
         change_kwargs = self._change_point_kwargs()
         change_points = compute_change_points(
@@ -135,6 +149,7 @@ class StorySegmentationPipeline:
             change_points=change_points,
             vad_segments=vad_segments,
             transcript_words=transcript_words,
+            extra_candidates=llm_candidates,
         )
 
         segment_ranges = [(plan.start_s, plan.end_s) for plan in segment_plans]
@@ -245,6 +260,82 @@ class StorySegmentationPipeline:
             logger.warning("Text embeddings failed", extra={"error": str(exc)})
             return []
 
+    def _generate_llm_candidates(
+        self,
+        words: Sequence[TranscriptWord],
+        audio_path: Path | None = None,
+    ) -> List[BoundaryCandidate]:
+        if not self._llm_segmentation_enabled or not words:
+            return []
+        try:
+            candidates = detect_topic_boundaries(
+                words,
+                model=self._llm_model,
+                system_prompt=self._llm_prompt,
+            )
+        except Exception as exc:  # pragma: no cover - logging path
+            logger.warning("LLM segmentation failed", extra={"error": str(exc)})
+            return []
+        return self._align_llm_candidates(
+            candidates=candidates,
+            words=words,
+            audio_path=audio_path,
+        )
+
+
+    def _align_llm_candidates(
+        self,
+        *,
+        candidates: Sequence[BoundaryCandidate],
+        words: Sequence[TranscriptWord],
+        audio_path: Path | None,
+    ) -> List[BoundaryCandidate]:
+        if not candidates:
+            return []
+        aligned: List[BoundaryCandidate] = []
+        for candidate in candidates:
+            aligned.append(
+                self._match_llm_candidate(candidate=candidate, words=words, audio_path=audio_path)
+            )
+        return aligned
+
+
+    def _match_llm_candidate(
+        self,
+        *,
+        candidate: BoundaryCandidate,
+        words: Sequence[TranscriptWord],
+        audio_path: Path | None,
+    ) -> BoundaryCandidate:
+        quote = getattr(candidate, "quote", None)
+        if not quote:
+            return candidate
+        try:
+            match_range = match_quote_to_timestamps(quote, words)
+        except RuntimeError as exc:  # pragma: no cover - optional dependency missing
+            logger.debug("LLM quote matching unavailable", extra={"error": str(exc)})
+            return candidate
+        if not match_range:
+            return candidate
+        start_ms, end_ms = match_range
+        refined_start, refined_end = start_ms, end_ms
+        if audio_path:
+            try:
+                refined_start, refined_end = refine_range_with_silence(
+                    audio_path, (start_ms, end_ms)
+                )
+            except Exception as exc:  # pragma: no cover - optional dependency missing
+                logger.debug("LLM quote refinement skipped", extra={"error": str(exc)})
+        new_time_s = refined_start / 1000.0
+        return BoundaryCandidate(
+            time_s=new_time_s,
+            score=candidate.score,
+            reason=candidate.reason,
+            quote=candidate.quote,
+        )
+
+
+
     def _audio_embedding_options(self) -> tuple[float, float]:
         heuristics = self.station_config.heuristics or {}
         window_s = _first_float(heuristics, ["audio_window_s"], DEFAULT_AUDIO_WINDOW_S)
@@ -272,9 +363,17 @@ class StorySegmentationPipeline:
         change_points: Sequence[ChangePoint],
         vad_segments: Sequence[VadSegment],
         transcript_words: Sequence[TranscriptWord] | None,
+        extra_candidates: Sequence[BoundaryCandidate] | None = None,
     ) -> List[SegmentPlan]:
         refined: List[SegmentPlan] = []
         for chunk in chunk_plans:
+            chunk_extras = None
+            if extra_candidates:
+                chunk_extras = [
+                    candidate
+                    for candidate in extra_candidates
+                    if chunk.start_s < candidate.time_s < chunk.end_s
+                ]
             chunk_segments = refine_chunk_segments(
                 chunk.start_s,
                 chunk.end_s,
@@ -282,6 +381,7 @@ class StorySegmentationPipeline:
                 params=self._refinement_params,
                 vad_segments=vad_segments,
                 transcript_words=transcript_words,
+                extra_candidates=chunk_extras,
             )
             refined.extend(self._label_refined_segments(chunk, chunk_segments))
         return refined or list(chunk_plans)
@@ -441,3 +541,4 @@ def _clamped_threshold(value: float) -> float:
     if value > 1.0:
         return 1.0
     return value
+

@@ -2,6 +2,10 @@
 sample_rate: 16000
 text:
   chunk_size_s: 3.0        # NEW: Higher precision text analysis
+  llm_segmentation: true
+  llm_model: gpt-4o-mini
+  llm_prompt: |
+    Identify topic changes in this radio news transcript and return JSON with boundaries.
   chunk_overlap_ratio: 0.5
 heuristics:
   boundary_threshold: 3.0

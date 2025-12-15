@@ -47,6 +47,7 @@ def refine_chunk_segments(
     params: RefinementParams | None = None,
     vad_segments: Sequence[VadSegment] | None = None,
     transcript_words: Sequence[TranscriptWord] | None = None,
+    extra_candidates: Sequence[BoundaryCandidate] | None = None,
     peak_reason: str = "change_peak",
 ) -> List[SegmentPlan]:
     if params is None:
@@ -69,6 +70,10 @@ def refine_chunk_segments(
         )
     else:
         candidates = []
+
+    if extra_candidates:
+        candidates.extend(extra_candidates)
+        candidates.sort(key=lambda c: c.time_s)
 
     safe_candidates: list[BoundaryCandidate] = []
     if vad_segments:
