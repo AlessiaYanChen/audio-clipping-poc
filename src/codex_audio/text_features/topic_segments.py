@@ -4,7 +4,9 @@ import json
 import os
 import re
 from bisect import bisect_left
-from typing import Callable, Iterator, List, Sequence, Tuple
+from collections import Counter
+from dataclasses import dataclass
+from typing import Callable, Iterator, List, Sequence
 
 from openai import AzureOpenAI
 
@@ -14,16 +16,36 @@ from codex_audio.transcription import TranscriptWord
 DEFAULT_LLM_MODEL = os.getenv("AZURE_OPENAI_LLM_MODEL", "gpt-4o-mini")
 DEFAULT_SYSTEM_PROMPT = (
     "You segment radio news transcripts into distinct stories. "
-    "Return JSON with a 'boundaries' array of objects {\"time\": float, \"reason\": str}."
+    "Return JSON with a 'boundaries' array of objects {"
+    '"time_s": number seconds since audio start, '
+    '"quote": string of 5-15 exact words copied verbatim from the transcript near the boundary, '
+    '"type": one of [new_story, return_to_anchor, ad_break, tease, weather, traffic, sports], '
+    '"confidence": number between 0 and 1 representing boundary certainty}'
 )
 WINDOW_DURATION_S = 10 * 60  # 10-minute content windows keep context tight
 WINDOW_OVERLAP_S = 2 * 60    # 2-minute overlap lets adjacent windows vote
 MERGE_TOLERANCE_S = 5.0      # boundaries agreeing within 5s collapse into one
 BASE_SCORE = 3.0
 VOTE_BONUS = 0.5
+BOUNDARY_TYPES = {
+    "new_story",
+    "return_to_anchor",
+    "ad_break",
+    "tease",
+    "weather",
+    "traffic",
+    "sports",
+}
 
 ResponseProvider = Callable[[str, str, str | None, str | None, str | None, str], str]
-ParsedBoundary = Tuple[float, str | None]
+
+
+@dataclass(frozen=True)
+class ParsedBoundary:
+    time_s: float
+    quote: str | None
+    boundary_type: str | None
+    confidence: float | None
 
 
 def detect_topic_boundaries(
@@ -62,8 +84,10 @@ def detect_topic_boundaries(
             score=BASE_SCORE + VOTE_BONUS * (votes - 1),
             reason="llm_topic_change" if votes == 1 else f"llm_topic_change (votes={votes})",
             quote=quote,
+            boundary_type=boundary_type,
+            confidence=confidence,
         )
-        for time, quote, votes in merged_entries
+        for time, quote, votes, boundary_type, confidence in merged_entries
     ]
 
 
@@ -75,11 +99,16 @@ def _build_prompt(words: Sequence[TranscriptWord]) -> str:
     transcript = "\n".join(lines)
     window_start = words[0].start_s
     window_end = words[-1].start_s
+    type_values = ", ".join(sorted(BOUNDARY_TYPES))
     instructions = (
         "Analyze the following radio news transcript excerpt ("  # keep request concise
         f"{window_start:.2f}s to {window_end:.2f}s). "
         "Identify timestamps (in seconds) where the topic changes. "
-        "Respond with JSON: {\"boundaries\": [{\"time\": number, \"reason\": string}, ...]}."
+        'Respond with JSON: {"boundaries": [{"time_s": number, "quote": string of 5-15 exact words copied from the transcript near the boundary, '
+        '"type": one of ['
+        + type_values
+        + '], "confidence": number between 0 and 1}, ...]}. '
+        "Quotes must be verbatim phrases, not summaries."
     )
     return f"{instructions}\n\nTranscript:\n{transcript}"
 
@@ -115,20 +144,38 @@ def _parse_boundaries(response_text: str) -> List[ParsedBoundary]:
         matches = pattern.findall(response_text)
         if not matches:
             matches = re.findall(r"(\d+(?:\.\d+)?)", response_text)
-        return [(float(value), None) for value in matches if _valid_time(value)]
+        return [
+            ParsedBoundary(
+                time_s=float(value),
+                quote=None,
+                boundary_type=None,
+                confidence=None,
+            )
+            for value in matches
+            if _valid_time(value)
+        ]
 
     entries = payload.get("boundaries", []) if isinstance(payload, dict) else []
     parsed: List[ParsedBoundary] = []
     for item in entries:
         if not isinstance(item, dict):
             continue
-        time_value = item.get("time")
+        time_value = item.get("time_s")
+        if time_value is None:
+            time_value = item.get("time") or item.get("timestamp")
         if not _valid_time(time_value):
             continue
-        quote = item.get("quote") or item.get("reason")
-        if quote is not None:
-            quote = str(quote)
-        parsed.append((float(time_value), quote))
+        quote = _clean_quote(item.get("quote") or item.get("reason"))
+        boundary_type = _coerce_boundary_type(item.get("type"))
+        confidence = _coerce_confidence(item.get("confidence"))
+        parsed.append(
+            ParsedBoundary(
+                time_s=float(time_value),
+                quote=quote,
+                boundary_type=boundary_type,
+                confidence=confidence,
+            )
+        )
     return parsed
 
 
@@ -162,17 +209,17 @@ def _iter_windows(
 
 def _merge_boundary_votes(
     entries: Sequence[ParsedBoundary], *, tolerance_s: float = MERGE_TOLERANCE_S
-) -> List[tuple[float, str | None, int]]:
+) -> List[tuple[float, str | None, int, str | None, float | None]]:
     if not entries:
         return []
 
-    sorted_entries = sorted(entries, key=lambda item: item[0])
-    merged: List[tuple[float, str | None, int]] = []
+    sorted_entries = sorted(entries, key=lambda item: item.time_s)
+    merged: List[tuple[float, str | None, int, str | None, float | None]] = []
     cluster: List[ParsedBoundary] = [sorted_entries[0]]
 
     for current in sorted_entries[1:]:
-        previous_time = cluster[-1][0]
-        if current[0] - previous_time <= tolerance_s:
+        previous_time = cluster[-1].time_s
+        if current.time_s - previous_time <= tolerance_s:
             cluster.append(current)
             continue
         merged.append(_collapse_cluster(cluster))
@@ -182,11 +229,30 @@ def _merge_boundary_votes(
     return merged
 
 
-def _collapse_cluster(cluster: Sequence[ParsedBoundary]) -> tuple[float, str | None, int]:
+def _collapse_cluster(
+    cluster: Sequence[ParsedBoundary],
+) -> tuple[float, str | None, int, str | None, float | None]:
     votes = len(cluster)
-    avg_time = sum(item[0] for item in cluster) / votes
-    quote = next((item[1] for item in cluster if item[1]), cluster[0][1])
-    return avg_time, quote, votes
+    avg_time = sum(item.time_s for item in cluster) / votes
+    quote = next((item.quote for item in cluster if item.quote), cluster[0].quote)
+    boundary_type = _select_boundary_type(cluster)
+    confidence = _average_confidence(cluster)
+    return avg_time, quote, votes, boundary_type, confidence
+
+
+def _select_boundary_type(cluster: Sequence[ParsedBoundary]) -> str | None:
+    labels = [entry.boundary_type for entry in cluster if entry.boundary_type]
+    if not labels:
+        return cluster[0].boundary_type
+    counts = Counter(labels)
+    return counts.most_common(1)[0][0]
+
+
+def _average_confidence(cluster: Sequence[ParsedBoundary]) -> float | None:
+    confidences = [entry.confidence for entry in cluster if entry.confidence is not None]
+    if not confidences:
+        return None
+    return sum(confidences) / len(confidences)
 
 
 def _valid_time(value: object) -> bool:
@@ -195,6 +261,43 @@ def _valid_time(value: object) -> bool:
         return True
     except (TypeError, ValueError):
         return False
+
+
+def _clean_quote(value: object) -> str | None:
+    if value is None:
+        return None
+    quote = str(value).strip()
+    if not quote:
+        return None
+    words = quote.split()
+    if not words:
+        return None
+    if len(words) > 15:
+        words = words[:15]
+    return " ".join(words)
+
+
+def _coerce_boundary_type(value: object) -> str | None:
+    if value is None:
+        return None
+    boundary_type = str(value).strip().lower()
+    if not boundary_type:
+        return None
+    if boundary_type not in BOUNDARY_TYPES:
+        return None
+    return boundary_type
+
+
+def _coerce_confidence(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        return None
+    if confidence < 0.0 or confidence > 1.0:
+        return None
+    return confidence
 
 
 __all__ = ["detect_topic_boundaries"]

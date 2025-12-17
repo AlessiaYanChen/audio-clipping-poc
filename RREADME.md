@@ -1,225 +1,84 @@
-﻿# ðŸ“¡ News Audio Story Segmentation
+# News Audio Story Segmentation
 
-### Hybrid Audio + Text Pipeline for Radio Story Boundary Detection
-
-This project performs **automatic segmentation of radio newscasts** (CKNW, CFAX, CBC, CHNL, CKFR) into **story-level audio clips** using a hybrid approach that combines:
-
-* **Audio features** (VAD, diarization, audio embeddings, acoustic change detection)
-* **Transcription + text features** (word timestamps, semantic embeddings, topic shifts)
-* **Heuristic + data-driven boundary detection**
-* **FFmpeg-based clipping**
-* **Evaluation harness** with precision/recall/F1 metrics and parameter sweeps
-
-> **Goal:** Production-quality, robust, station-independent story segmentation for continuous 24/7 radio monitoring.
+Hybrid audio + text tooling for automatically slicing 24/7 radio news recordings
+into story-level clips. The pipeline combines speech-to-text, diarization,
+acoustic change detection, and an LLM-based topic segmenter to deliver
+production-ready boundaries with precise timestamps, quotes, and labels.
 
 ---
 
-## ðŸš€ Features
-
-* ðŸŽ§ **Audio track analysis**
-
-  * Voice Activity Detection (VAD)
-  * Speaker diarization (anchor detection, studio/field separation)
-  * Short-window audio embeddings (3â€“5 s)
-  * Acoustic change-point detection
-  * Silence & jingle detection
-
-* ðŸ“ **Text track analysis**
-
-  * Whisper/Azure STT transcription
-  * Word-aligned timestamps
-  * Text chunking (5â€“10 s)
-  * Semantic embeddings
-  * Topic shift detection
-
-* ðŸ” **Hybrid boundary detection**
-
-  * Combines audio + text + structural heuristics
-  * Scored boundary candidates with reasons
-  * Station-specific tunable configs
-
-* âœ‚ï¸ **Clipper**
-
-  * Clean, gap-free, timestamp-accurate FFmpeg clipping
-
-* ðŸ“Š **Evaluation harness**
-
-  * GT boundary loading
-  * Tolerance-based matching
-  * Precision/recall/F1
-  * Per-station metrics
-  * Threshold sweeps for scientific tuning
+## Key Capabilities
+- **Audio feature stack** – VAD, diarization, sliding-window embeddings, silence
+  and jingle detection, and acoustic change-points feed candidate generation.
+- **Text feature stack** – Azure/Whisper transcripts, word-aligned timestamps,
+  text embeddings, and LLM topic votes enrich the signal surface.
+- **LLM boundary schema** – Every topic boundary now emits `time_s`, a verbatim
+  5–15 word `quote`, a categorical `type`, and a 0–1 `confidence`, making
+  transcript alignment deterministic and ready for silence snapping.
+- **FFmpeg clipping** – Selected boundaries become gap-free WAV segments plus a
+  JSON manifest for downstream workflows.
+- **Evaluation harness** – Ground-truth manifests, precision/recall/F1 summaries,
+  and hyper-parameter sweeps keep tuning measurable.
 
 ---
 
-# ðŸ“¦ Architecture Overview
-
-```
-audio file
-   â”‚
-   â–¼
-â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
-â”‚    Ingestor      â”‚  â†’ normalize + resample (16k mono WAV)
-â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
-   â”‚
-   â–¼
-
-        â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
-        â”‚         Dual Feature Extraction        â”‚
-        â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
-
-  â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”      â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
-  â”‚      Audio Track          â”‚      â”‚          Text Track          â”‚
-  â”‚  - VAD                    â”‚      â”‚  - Transcription (Whisper)   â”‚
-  â”‚  - Diarization            â”‚      â”‚  - Word timestamps           â”‚
-  â”‚  - Audio embeddings       â”‚      â”‚  - Text chunking (5â€“10 s)    â”‚
-  â”‚  - Jingle/silence detect  â”‚      â”‚  - Semantic embeddings       â”‚
-  â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜      â”‚  - Semantic shift detection  â”‚
-                                     â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
-   â”‚                                           â”‚
-   â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
-                          â–¼
-            â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
-            â”‚        Hybrid Boundary Detector        â”‚
-            â”‚  - score candidates                    â”‚
-            â”‚  - merge audio + text signals          â”‚
-            â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
-                          â”‚
-                          â–¼
-            â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
-            â”‚             Segment Planner            â”‚
-            â”‚ - prune, dedupe, min length            â”‚
-            â”‚ - snap to word boundary / energy dip   â”‚
-            â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
-                          â”‚
-                          â–¼
-            â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
-            â”‚                Clipper                 â”‚
-            â”‚     - FFmpeg cuts per segment          â”‚
-            â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
-                          â”‚
-                          â–¼
-               Output:
-               - segments.json
-               - transcript.json
-               - segments/*.wav
-
-```
-
-A high-resolution PDF version is available (`docs/news_audio_architecture.pdf`).
+## Architecture Overview
+1. **Ingestor** – Normalizes any input into 16 kHz mono WAV and extracts
+   metadata.
+2. **Dual feature extraction** – Audio track (VAD, diarization, embeddings) and
+   text track (transcription, chunking, embeddings) run in parallel.
+3. **Hybrid boundary detector** – Scores silence gaps, acoustic deltas, semantic
+   shifts, anchors, and LLM topic votes into ranked `BoundaryCandidate` objects.
+4. **Planner & refinement** – Deduplicates, enforces min spacing, and snaps to
+   word boundaries or nearby silence/jingles.
+5. **Clipper** – Invokes FFmpeg to cut WAVs per segment and emits
+   `segments.json` + `transcript.json` for consumers.
 
 ---
 
-# ðŸ“ Repository Structure
-
-Recommended layout:
-
+## Repository Layout
 ```
-codex-audio/
+audio-clipping-poc/
   README.md
   pyproject.toml
-  codex_audio/
-    __init__.py
-    config.py
-    models.py
-    cli.py
-
-    ingest.py
-    io_utils.py
-
-    transcription/
-      whisper_backend.py
-
-    features/
-      vad.py
-      diarization.py
-      embeddings.py
-      lowlevel.py
-
-    text_features/
-      segments.py
-      embeddings.py
-      change_points.py
-
-    segmentation/
-      candidates.py
-      scoring.py
-      planner.py
-
-    clipping/
-      ffmpeg_wrapper.py
-
-    evaluation/
-      io.py
-      matching.py
-      metrics.py
-      sweep.py
-      cli.py
-
-  docs/
-    news_audio_architecture.pdf
-    examples.md
-  tests/
-    test_ingest.py
-    test_features.py
-    test_segmentation.py
-    test_evaluation.py
+  requirements.txt
+  requirements-dev.txt
+  samples/                  # shared WAV snippets & fixtures
+  src/codex_audio/          # pipeline code grouped by responsibility
+  tests/                    # pytest suite mirroring src layout + fixtures
+  docs/assets/              # lightweight SVGs / diagrams
 ```
 
 ---
 
-# ðŸ›  Installation
-
-### Requirements:
-
-* Python 3.10+
-* FFmpeg installed on system
-* Whisper or Azure STT
-* Pyannote (optional but recommended for diarization)
-
-```bash
-pip install -r requirements.txt
-```
+## Getting Started
+1. **Python & venv**
+   ```bash
+   python -m venv .venv
+   .venv\Scripts\activate  # or source .venv/bin/activate on macOS/Linux
+   ```
+2. **Install deps**
+   ```bash
+   pip install -r requirements.txt -r requirements-dev.txt
+   ```
+3. **Environment** – Set Azure credentials in `.env` or your shell:
+   - `AZURE_SPEECH_KEY`, `AZURE_SPEECH_REGION`
+   - `AZURE_OPENAI_KEY`, `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_VERSION`
+   - Optional: `AZURE_OPENAI_LLM_MODEL` override
 
 ---
 
-# ðŸ§ª Running the Pipeline
-
-## Azure Transcription & Diarization
-
-1. Set `AZURE_SPEECH_KEY` and `AZURE_SPEECH_REGION` in your shell (or `.env`).
-2. Add a `transcription` block to your station config so Azure STT can emit speaker IDs:
-
-```yaml
-transcription:
-  provider: azure_speech
-  diarization: true
-  max_speakers: 6
-```
-
-3. Run the CLI normally:
-
+## Running the CLI
+### Segment an Audio File
 ```bash
-codex-audio segment examples/CBU_730z_251119_072800.mov \
+codex-audio segment samples/snare.wav \
   --station CKNW \
   --config config/stations/CKNW.yaml \
-  --out out/diarized
+  --out out/cknw_demo
 ```
-
-With `diarization: true`, the emitted `transcript.json` includes a `speaker` field for every word, and the pipeline still performs the LLM quote alignment and silence refinement automatically.
-
-### Segment an audio file
-
-```bash
-codex-audio segment input.wav \
-  --station CKNW \
-  --out out_dir/
+Produces:
 ```
-
-Outputs:
-
-```
-out_dir/
+out/cknw_demo/
   segments/
     segment_000.wav
     segment_001.wav
@@ -227,99 +86,100 @@ out_dir/
   transcript.json
 ```
 
----
-
-# ðŸ“Š Evaluation Harness
-
-### Manifest format (`evaluation_manifest.csv`)
-
-```csv
-audio_path,annotation_path,station
-data/CKNW_2025-01-15.wav,annotations/CKNW_2025-01-15.csv,CKNW
-data/CFAX_2025-01-12.wav,annotations/CFAX_2025-01-12.csv,CFAX
+`segments.json` contains ranked boundaries with the new schema:
+```json
+{
+  "segments": [
+    {
+      "id": "segment_001",
+      "start_s": 185.92,
+      "end_s": 246.07,
+      "llm": {
+        "time_s": 187.11,
+        "quote": "the finance minister returned to the legislature",
+        "type": "new_story",
+        "confidence": 0.82
+      }
+    }
+  ]
+}
 ```
+The quote is copied verbatim from the transcript so `match_quote_to_timestamps`
+can deterministically snap the boundary to real word timings before the final
+silence/jingle refinement.
 
-### Ground truth annotation CSV
+#### Boundary schema
+| field        | Type    | Notes                                                                 |
+|--------------|---------|-----------------------------------------------------------------------|
+| `time_s`     | float   | Initial LLM boundary guess in seconds (snapped later via quote match) |
+| `quote`      | string  | 5–15 exact transcript words near the transition                       |
+| `type`       | string  | One of `new_story`, `return_to_anchor`, `ad_break`, `tease`, `weather`, `traffic`, `sports` |
+| `confidence` | float   | LLM certainty between 0 and 1                                         |
 
-```csv
-time_s
-61.3
-185.9
-402.4
-...
+These attributes now flow through the refinement pipeline so downstream tools
+can key on consistent labels while still benefiting from deterministic quote
+alignment.
+
+### Azure STT + Diarization
+```yaml
+transcription:
+  provider: azure_speech
+  diarization: true
+  max_speakers: 6
 ```
-
-### Run evaluation
-
-```bash
-codex-audio eval \
-  --manifest evaluation_manifest.csv \
-  --tolerance-s 3.0 \
-  --config station_config.yaml
-```
-
-Output example:
-
-```
-Overall:
-  Precision = 0.78
-  Recall    = 0.74
-  F1        = 0.76
-
-CKNW:
-  Precision = 0.80
-  Recall    = 0.71
-  F1        = 0.75
-```
-
----
-
-# ðŸ”¬ Threshold Sweeps
-
-```bash
-codex-audio sweep \
-  --manifest evaluation_manifest.csv \
-  --param silence_min_s 0.7 1.0 1.3 \
-  --param min_boundary_score 3.0 4.0 5.0
-```
-
-Generates `sweep_results.csv`:
-
-```
-silence_min_s,min_boundary_score,F1
-1.0,4.0,0.78
-0.7,3.0,0.74
-...
-```
+Running with `diarization: true` inserts a `speaker` value for every word in
+`transcript.json` while keeping LLM quote alignment, silence refinement, and the
+new schema intact.
 
 ---
 
-# ðŸ§© Extending the Pipeline
-
-Future enhancements:
-
-* LLM-based story labeling (title + summary per segment)
-* Automatic jingle classifier per station
-* Real-time streaming segmentation
-* Station-specific configuration auto-tuning
-* Combined audio+video segmentation (future)
+## Evaluation & Sweeps
+1. **Manifest** (`evaluation_manifest.csv`)
+   ```csv
+   audio_path,annotation_path,station
+   data/CKNW_2025-01-15.wav,annotations/CKNW_2025-01-15.csv,CKNW
+   ```
+2. **Ground-truth CSV** – one `time_s` column listing human boundaries.
+3. **Run evaluation**
+   ```bash
+   codex-audio eval \
+     --manifest evaluation_manifest.csv \
+     --tolerance-s 3.0 \
+     --config station_config.yaml
+   ```
+4. **Threshold sweeps**
+   ```bash
+   codex-audio sweep \
+     --manifest evaluation_manifest.csv \
+     --param silence_min_s 0.7 1.0 1.3 \
+     --param min_boundary_score 3.0 4.0 5.0
+   ```
 
 ---
 
-# ðŸ¤ Contributing
+## Testing & QA
+- `pytest -q`
+- `ruff check src tests`
+- `black --check src tests`
+- `mypy src`
 
-PRs welcome!
-Please file an issue before adding major features.
-Add tests for all new modules.
+Keep coverage above 85% with `pytest --cov=audio_clipping --cov-report=term-missing`.
 
 ---
 
-If you want, I can also:
+## Extending the Pipeline
+- LLM-based story titling and summaries.
+- Automatic jingle classifiers per station.
+- Real-time streaming segmentation.
+- Station-specific auto-tuning.
+- Combined audio+video segmentation experiments.
 
-âœ… Generate the scaffolding project folder with empty modules
-âœ… Produce the `pyproject.toml` or `requirements.txt`
-âœ… Write the initial CLI implementation
-âœ… Create the `examples/` folder with realistic sample outputs
+---
 
-Just tell me!
+## Contributing
+1. Follow Conventional Commits, e.g., `feat(dsp): add soft clipper`.
+2. Keep PRs focused with proof (CLI output, pytest, screenshots if applicable).
+3. Request review and wait for CI green lights before merging.
 
+Need help bootstrapping configs, notebooks, or scripts? Open an issue and we can
+chat through it.

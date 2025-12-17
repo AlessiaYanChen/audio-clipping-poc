@@ -10,6 +10,8 @@ class BoundaryCandidate:
     score: float
     reason: str
     quote: str | None = None
+    boundary_type: str | None = None
+    confidence: float | None = None
 
 
 def propose_candidates() -> List[BoundaryCandidate]:

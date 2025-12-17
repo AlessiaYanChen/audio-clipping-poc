@@ -16,7 +16,18 @@ def _words() -> list[TranscriptWord]:
 
 def test_detect_topic_boundaries_parses_json(monkeypatch) -> None:
     def fake_provider(prompt, model, key, endpoint, api_version, system_prompt):
-        return json.dumps({"boundaries": [{"time": 42.5, "reason": "new"}]})
+        return json.dumps(
+            {
+                "boundaries": [
+                    {
+                        "time_s": 42.5,
+                        "quote": "Hello world new story pivot now",
+                        "type": "new_story",
+                        "confidence": 0.87,
+                    }
+                ]
+            }
+        )
 
     candidates = detect_topic_boundaries(
         _words(),
@@ -30,7 +41,9 @@ def test_detect_topic_boundaries_parses_json(monkeypatch) -> None:
     assert isinstance(candidates[0], BoundaryCandidate)
     assert candidates[0].time_s == 42.5
     assert candidates[0].reason == "llm_topic_change"
-    assert candidates[0].quote == "new"
+    assert candidates[0].quote == "Hello world new story pivot now"
+    assert candidates[0].boundary_type == "new_story"
+    assert candidates[0].confidence == 0.87
 
 
 def test_detect_topic_boundaries_handles_brackets(monkeypatch) -> None:

@@ -334,6 +334,8 @@ class StorySegmentationPipeline:
             score=candidate.score,
             reason=candidate.reason,
             quote=candidate.quote,
+            boundary_type=candidate.boundary_type,
+            confidence=candidate.confidence,
         )
 
 
